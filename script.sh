@@ -1,17 +1,19 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # created by BKF
-# Usage: sudo ./script.sh 
-# {init|open|close|status|gpg-gen|gpg-export|gpg-import|ssh-setup|ssh-import}
-
-
+# Usage: ./script.sh {init|open|close|status|gpg-gen|gpg-export|gpg-import|ssh-setup|ssh-import}
 
 ###############################################################################################################
-#                                            verifiyind sudo                                                  #
+#                                            verifying sudo                                                  #
 ###############################################################################################################
-if [ "$EUID" -ne 0 ]; then
-  echo "You are not a sudoer ¯\_(ツ)_/¯, please reconnect as such"
-  exec sudo bash "$0" "$@"
+if ! sudo -v; then
+  echo "You need sudo privileges ¯\_(ツ)_/¯"
+  exit 1
 fi
+
+# run as real user, not root
+REAL_USER=${SUDO_USER:-$USER}
+REAL_HOME=$(eval echo "~$REAL_USER")
+export HOME="$REAL_HOME"
 
 # Ensure system binaries are found
 export PATH="$PATH:/sbin:/usr/sbin"
@@ -19,7 +21,6 @@ export PATH="$PATH:/sbin:/usr/sbin"
 ###############################################################################################################
 #                                          Configurable parameters                                            #
 ###############################################################################################################
-
 defaults() {
   : "${CONTAINER_PATH:=$HOME/vault.img}"
   : "${CONTAINER_SIZE:=5G}"
@@ -35,19 +36,18 @@ defaults
 ###############################################################################################################
 #                                         Cleanup in case of error/exit                                       #
 ###############################################################################################################
-
 cleanup() {
   # If mounted, dismantle
   if mountpoint -q "$MOUNT_DIR"; then
-    umount "$MOUNT_DIR" || true
+    sudo umount "$MOUNT_DIR" || true
   fi
   # If open, close LUKS
-  if cryptsetup status "$LUKS_NAME" &>/dev/null; then
-    cryptsetup close "$LUKS_NAME" || true
+  if sudo cryptsetup status "$LUKS_NAME" &>/dev/null; then
+    sudo cryptsetup close "$LUKS_NAME" || true
   fi
   # Finds the loop device associated with the image and detaches it
-  if LOOP=$(losetup -j "$CONTAINER_PATH" | cut -d: -f1); then # -d: indicates to cut that the field delimiter is the colon character :    |    -f1 asks to keep only the first field
-    [ -n "$LOOP" ] && losetup -d "$LOOP" # If a loop device has been found, it is released
+  if LOOP=$(sudo losetup -j "$CONTAINER_PATH" | cut -d: -f1); then
+    [ -n "$LOOP" ] && sudo losetup -d "$LOOP"
   fi
 }
 trap cleanup EXIT
@@ -57,39 +57,47 @@ trap cleanup EXIT
 ###############################################################################################################
 #LUKS
 init_env() { 
+  # close any existing mapping
+  if sudo cryptsetup status "$LUKS_NAME" &>/dev/null; then
+    sudo cryptsetup close "$LUKS_NAME"
+  fi
+  if OLD_LOOP=$(sudo losetup -j "$CONTAINER_PATH" | cut -d: -f1); then
+    [ -n "$OLD_LOOP" ] && sudo losetup -d "$OLD_LOOP"
+  fi
+
   if [ -f "$CONTAINER_PATH" ]; then
     echo "[INIT] The $CONTAINER_PATH file already exists: deleting before recreating"
     rm -f "$CONTAINER_PATH"
   fi
 
   echo "[INIT] Creating $CONTAINER_SIZE container at $CONTAINER_PATH"
-  dd if=/dev/zero of="$CONTAINER_PATH" bs=1 count=0 seek="$CONTAINER_SIZE"
-  chown root:root "$CONTAINER_PATH"
+  sudo dd if=/dev/zero of="$CONTAINER_PATH" bs=1 count=0 seek="$CONTAINER_SIZE"
+  sudo chown "$REAL_USER":"$REAL_USER" "$CONTAINER_PATH"
   chmod 600 "$CONTAINER_PATH"
 
   echo "[INIT] Associating loop device"
-  LOOP=$(losetup --show -f "$CONTAINER_PATH")
+  LOOP=$(sudo losetup --show -f "$CONTAINER_PATH")
 
   echo "[INIT] Checking for cryptsetup"
   if ! command -v cryptsetup >/dev/null 2>&1; then
     echo "cryptsetup not found, installing…"
-    apt update && apt install -y cryptsetup
+    sudo apt update && sudo apt install -y cryptsetup
     echo "cryptsetup installed ✔"
   fi
 
   echo "[INIT] Formatting as LUKS (you will be prompted for YES and your passphrase)"
-  cryptsetup luksFormat "$LOOP"
+  sudo cryptsetup luksFormat "$LOOP"
 
   echo "[INIT] Opening encrypted volume"
-  cryptsetup open "$LOOP" "$LUKS_NAME"
+  sudo cryptsetup open "$LOOP" "$LUKS_NAME"
 
   echo "[INIT] Creating ext4 filesystem"
-  mkfs.ext4 /dev/mapper/"$LUKS_NAME"
+  sudo mkfs.ext4 /dev/mapper/"$LUKS_NAME"
 
   echo "[INIT] Creating and securing directories"
-  mkdir -p "$MOUNT_DIR"
-  chmod 700 "$MOUNT_DIR"
-  mount /dev/mapper/"$LUKS_NAME" "$MOUNT_DIR"
+  sudo mkdir -p "$MOUNT_DIR"
+  sudo mount /dev/mapper/"$LUKS_NAME" "$MOUNT_DIR"
+  sudo chown "$REAL_USER":"$REAL_USER" "$MOUNT_DIR"
   mkdir -p "$GPG_DIR" "$SSH_DIR"
   chmod 700 "$GPG_DIR" "$SSH_DIR"
 
@@ -103,10 +111,10 @@ open_env() {
   fi
 
   echo "[OPEN] Opening $CONTAINER_PATH"
-  LOOP=$(losetup --show -f "$CONTAINER_PATH")
-  cryptsetup open "$LOOP" "$LUKS_NAME"
+  LOOP=$(sudo losetup --show -f "$CONTAINER_PATH")
+  sudo cryptsetup open "$LOOP" "$LUKS_NAME"
   mkdir -p "$MOUNT_DIR"
-  mount /dev/mapper/"$LUKS_NAME" "$MOUNT_DIR"
+  sudo mount /dev/mapper/"$LUKS_NAME" "$MOUNT_DIR"
   echo "[OPEN] Vault mounted on $MOUNT_DIR"
 }  
 
@@ -117,21 +125,21 @@ close_env() {
   fi
 
   echo "[CLOSE] Unmounting $MOUNT_DIR"
-  umount "$MOUNT_DIR"
+  sudo umount "$MOUNT_DIR"
 
   echo "[CLOSE] Closing the LUKS mapping"
-  cryptsetup close "$LUKS_NAME"
+  sudo cryptsetup close "$LUKS_NAME"
 
   echo "[CLOSE] Detaching the loop device"
-  LOOP=$(losetup -j "$CONTAINER_PATH" | cut -d: -f1)
-  losetup -d "$LOOP"
+  LOOP=$(sudo losetup -j "$CONTAINER_PATH" | cut -d: -f1)
+  [ -n "$LOOP" ] && sudo losetup -d "$LOOP"
   echo "[CLOSE] Vault closed"
 }  
 
 status_env() {
   echo "=== VAULT STATUS ==="
   echo "- Container: $CONTAINER_PATH"
-  if cryptsetup status "$LUKS_NAME" &>/dev/null; then
+  if sudo cryptsetup status "$LUKS_NAME" &>/dev/null; then
     echo "- LUKS: open (mapping: $LUKS_NAME)"
   else
     echo "- LUKS: closed"
@@ -245,7 +253,6 @@ Host *
   IdentityFile $key
   IdentitiesOnly yes
 EOF
-  # write SSH config alias file for the user and not root 
   chmod 600 "$SSH_DIR/config"
   echo "alias evsh='ssh -F $SSH_DIR/config'" > "$SSH_ALIAS_FILE"
   REAL_USER="${SUDO_USER:-$USER}"
@@ -266,21 +273,20 @@ import_ssh() {
   fi
 
   mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR"
-  cp -r "$SRC/"* "$SSH_DIR"/ 2>/dev/null # Copy all .ssh content
+  cp -r "$SRC/"* "$SSH_DIR"/ 2>/dev/null
   chmod 600 "$SSH_DIR"/*
 
-  # We use the same config and alias
   ln -sf "$SSH_ALIAS_FILE" "$BASH_ALIAS_FILE"
-  grep -qxF "source $SSH_ALIAS_FILE" "$HOME/.bashrc" || echo "source $SSH_ALIAS_FILE" >> "$HOME/.bashrc"
+  grep -qxF "source $SSH_ALIAS_FILE" "$HOME/.bashrc" \
+    || echo "source $SSH_ALIAS_FILE" >> "$HOME/.bashrc"
   echo "[SSH-IMPORT] OK: imported all SSH files into $SSH_DIR"
 }
 
 ###############################################################################################################
 #                                         Interactive menu loop                                               #
 ###############################################################################################################
-
 LIGHT=$'\e[38;2;207;92;120m'
-BLACK=$'\e[30m'
+DEF=$'\e[39m'
 RESET=$'\e[0m'
 
 #repeat a character N times
@@ -315,9 +321,8 @@ while true; do
     (( ${#line} > max )) && max=${#line}
   done
 
-  border=$(repeat_char '─' "$max") #build the horizontal border of length $max
+  border=$(repeat_char '─' "$max")
 
-  #display the box
   echo -e "${LIGHT}┌${border}┐${RESET}"
   title="MENU VAULT MANAGEMENT"
   tlen=${#title}
@@ -326,7 +331,7 @@ while true; do
   pad_right=$((pad_tot - pad_left))
   left=$(repeat_char ' ' "$pad_left")
   right=$(repeat_char ' ' "$pad_right")
-  echo -e "${LIGHT}│${RESET}${BLACK}${left}${title}${right}${RESET}${LIGHT}│${RESET}"
+  echo -e "${LIGHT}│${RESET}${DEF}${left}${title}${right}${RESET}${LIGHT}│${RESET}"
   echo -e "${LIGHT}├${border}┤${RESET}"
   for i in "${!menu_lines[@]}"; do
     idx=$((i+1))
@@ -334,12 +339,11 @@ while true; do
     line="${num}) ${menu_lines[i]}"
     pad_len=$((max - ${#line}))
     pad=$(repeat_char ' ' "$pad_len")
-    echo -e "${LIGHT}│${RESET}${BLACK}${line}${pad}${RESET}${LIGHT}│${RESET}"
+    echo -e "${LIGHT}│${RESET}${DEF}${line}${pad}${RESET}${LIGHT}│${RESET}"
   done
   echo -e "${LIGHT}└${border}┘${RESET}"
 
-  # prompt
-  read -rp $'\n'"${BLACK}Select an action: ${RESET}" choice
+  read -rp $'\n'"${DEF}Select a number: ${RESET}" choice
   case $choice in
     1) init_env   ;;
     2) open_env   ;;
@@ -350,9 +354,9 @@ while true; do
     7) import_gpg ;;
     8) setup_ssh  ;;
     9) import_ssh ;;
-    10) echo -e "${BLACK}Goodbye!${RESET}" ; exit 0 ;;
-    *) echo -e "${BLACK}Invalid option, try again.${RESET}" ;;
+    10) echo -e "${DEF}Goodbye ♥ ${RESET}" ; exit 0 ;;
+    *) echo -e "${DEF}Invalid option, try again.${RESET}" ;;
   esac
 
-  echo 
+  echo
 done
