@@ -27,6 +27,7 @@ A **script** shell to create, open and close a secure encrypted environment, aut
 
 - GNU/Linux (Debian/Ubuntu recommended)
 - `bash`
+- To be a sudoer
 
 ---
 
@@ -39,7 +40,7 @@ A **script** shell to create, open and close a secure encrypted environment, aut
  ```
  Use script: 
  ```bash
- sudo ./script.sh
+ ./script.sh
  ````
 
 ---
